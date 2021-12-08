@@ -121,8 +121,8 @@ class ReacherMimic(env.Env):
         # Calculate total reward
         current_reward = POSE_WEIGHT * pose_reward + VELOCITY_WEIGHT * \
             velocity_reward + END_EFFECTOR_WEIGHT * end_effector_reward
-        reward = state.reward + current_reward * \
-            (DISCOUNT_FACTOR ** self.sys.time)
+        # reward = state.reward + current_reward * \
+        #     (DISCOUNT_FACTOR ** self.sys.time)
 
         state.metrics.update(
             rewardPose=pose_reward,
@@ -130,7 +130,7 @@ class ReacherMimic(env.Env):
             rewardEndEffector=end_effector_reward,
         )
 
-        return state.replace(qp=qp, obs=obs, reward=reward)
+        return state.replace(qp=qp, obs=obs, reward=current_reward)
 
     def _get_obs(self, qp: brax.QP, info: brax.Info) -> jp.ndarray:
         # Note that joints are sorted by DOF in ascending order, so elbow comes first, then shoulder
