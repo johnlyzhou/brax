@@ -52,6 +52,7 @@ class System:
     self.actuators = actuators.get(self.config, self.joints)
     self.forces = forces.get(self.config, self.body)
     self.num_forces_dof = sum(f.act_index.shape[-1] for f in self.forces)
+    self.time = 0
 
   def default_angle(self, default_index: int = 0) -> jp.ndarray:
     """Returns the default joint angles for the system."""
@@ -219,7 +220,6 @@ class System:
 
   def step(self, qp: QP, act: jp.ndarray) -> Tuple[QP, Info]:
     """Calculates a physics step for a system, returns next state and info."""
-
     def substep(carry, _):
       qp, info = carry
 
@@ -247,4 +247,5 @@ class System:
     zero = P(jp.zeros((self.num_bodies, 3)), jp.zeros((self.num_bodies, 3)))
     info = Info(contact=zero, joint=zero, actuator=zero)
     (qp, info), _ = jp.scan(substep, (qp, info), (), self.config.substeps)
+    self.time += 1
     return qp, info
