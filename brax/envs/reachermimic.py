@@ -23,26 +23,43 @@ import brax
 from brax import jumpy as jp
 from brax import math
 from brax.envs import env
+from brax.physics.actuators import Torque
 import jax.numpy as jnp
+import numpy as np
 
 # Weights from DeepMimic paper
 POSE_WEIGHT = 0.65
 VELOCITY_WEIGHT = 0.1
 END_EFFECTOR_WEIGHT = 0.15
 
+REF_MOTION_LENGTH = 100
+DISCOUNT_FACTOR = 0.95
+
+REF_FRAME_PATH = "/Users/johnzhou/research/brax/reference_motion.npy"
+
+record_ref = False
+
+# If no reference motion file is found, start recording a new one
+try:
+    ref_frames = np.load(REF_FRAME_PATH)
+except FileNotFoundError:
+    print("No reference file, recording new reference motion")
+    ref_frames = None
+    record_ref = True
 
 # Reference motion should have the same format as the observations
-def get_ref_frame(time: int):
-    ref_el_angle = jp.array([0.9833245, 0, 0])
-    ref_sh_angle = jp.array([0.10947182, 0.02805336, 0.00091335])
-    ref_el_vel = jp.array([-0.24015688, 0, 0])
-    ref_sh_vel = jp.array([-1.35209720e-01, 1.23445109e-04, -3.79258831e-03])
-    ref_end_effector_pos = jp.array(
-        [1.56712445e-01, 1.11244174e-01, -5.87129361e-10])
-    return jp.concatenate([ref_el_angle, ref_sh_angle, ref_el_vel, ref_sh_vel, ref_end_effector_pos])
 
+
+def get_ref_frame(time: int):
+    if ref_frames is None:
+        return np.zeros(18)
+    if time >= ref_frames.shape[0]:
+        return ref_frames[-1]
+    return ref_frames[time]
 
 # Converts a n-dimensional vector, where n <= 3, to a 3-dimensional vector
+
+
 def to_3d(vec):
     dof = len(vec)
     if dof == 1:
@@ -57,8 +74,9 @@ class ReacherMimic(env.Env):
 
     def __init__(self, **kwargs):
         super().__init__(_SYSTEM_CONFIG, **kwargs)
-        self.target_idx = self.sys.body.index['target']
         self.arm_idx = self.sys.body.index['body1']
+        self.record_ref = record_ref
+        self.record = []
 
     def reset(self, rng: jp.ndarray) -> env.State:
         self.sys.time = 0
@@ -67,9 +85,6 @@ class ReacherMimic(env.Env):
             rng1, (self.sys.num_joint_dof,), -.1, .1)
         qvel = jp.random_uniform(rng2, (self.sys.num_joint_dof,), -.005, .005)
         qp = self.sys.default_qp(joint_angle=qpos, joint_velocity=qvel)
-        _, target = self._random_target(rng)
-        pos = jp.index_update(qp.pos, self.target_idx, target)
-        qp = qp.replace(pos=pos)
         info = self.sys.info(qp)
         obs = self._get_obs(qp, info)
         reward, done, zero = jp.zeros(3)
@@ -84,6 +99,12 @@ class ReacherMimic(env.Env):
         qp, info = self.sys.step(state.qp, action)
         obs = self._get_obs(qp, info)
 
+        if self.record_ref:
+            if isinstance(obs[0], np.float64):
+                self.record.append(np.asarray(obs))
+            if len(self.record) == REF_MOTION_LENGTH:
+                np.save(REF_FRAME_PATH, np.asarray(self.record))
+
         # Pull out components from observations
         el_angle = obs[:3]
         sh_angle = obs[3:6]
@@ -97,8 +118,10 @@ class ReacherMimic(env.Env):
         end_effector_reward = self._end_effector_reward(end_effector_vec)
 
         # Calculate total reward
-        reward = POSE_WEIGHT * pose_reward + VELOCITY_WEIGHT * \
+        current_reward = POSE_WEIGHT * pose_reward + VELOCITY_WEIGHT * \
             velocity_reward + END_EFFECTOR_WEIGHT * end_effector_reward
+        reward = state.reward + current_reward * \
+            (DISCOUNT_FACTOR ** self.sys.time)
 
         state.metrics.update(
             rewardPose=pose_reward,
@@ -108,8 +131,32 @@ class ReacherMimic(env.Env):
 
         return state.replace(qp=qp, obs=obs, reward=reward)
 
-    def _pose_reward(self, sim_el_angle: jp.ndarray, sim_sh_angle: jp.ndarray) -> float:
+    def _get_obs(self, qp: brax.QP, info: brax.Info) -> jp.ndarray:
+        # Note that joints are sorted by DOF in ascending order, so elbow comes first, then shoulder
+        (el_angle_x,), (el_vel_x,) = self.sys.joints[0].angle_vel(
+            qp)
+        (sh_angle_x, sh_angle_y, sh_angle_z), (sh_vel_x, sh_vel_y, sh_vel_z) = \
+            self.sys.joints[1].angle_vel(qp)
 
+        # Pull local joint angles for the pose reward
+        el_angle = to_3d(el_angle_x)
+        sh_angle = to_3d(jp.concatenate((sh_angle_x, sh_angle_y, sh_angle_z)))
+
+        # Pull local joint velocities for the velocity reward
+        el_vel = to_3d(jp.array(el_vel_x))
+        sh_vel = jp.concatenate((sh_vel_x, sh_vel_y, sh_vel_z))
+
+        # Pull distance from simulated end-effector to target end-effector for end-effector reward
+        arm_qps = jp.take(qp, jp.array(self.arm_idx))
+        tip_pos, _ = arm_qps.to_world(jp.array([0.11, 0., 0.]))
+        ref = get_ref_frame(self.sys.time)
+        target_pos = ref[15:18]
+        end_effector_vec = jp.array(tip_pos - target_pos)
+
+        # Include tip_pos as end-effector reference position when recording
+        return jp.concatenate([el_angle, sh_angle, el_vel, sh_vel, end_effector_vec, tip_pos])
+
+    def _pose_reward(self, sim_el_angle: jp.ndarray, sim_sh_angle: jp.ndarray) -> float:
         # Convert simulated joint angles from Euler to quaternion
         sim_el_quat = math.euler_to_quat(sim_el_angle)
         sim_sh_quat = math.euler_to_quat(sim_sh_angle)
@@ -132,7 +179,6 @@ class ReacherMimic(env.Env):
         return pose_reward
 
     def _velocity_reward(self, sim_el_vel: jp.ndarray, sim_sh_vel: jp.ndarray) -> float:
-
         # Get reference local joint angular velocities at this timestep
         ref_frame = get_ref_frame(self.sys.time)
         ref_el_vel = ref_frame[6:9]
@@ -151,48 +197,12 @@ class ReacherMimic(env.Env):
         return pose_reward
 
     def _end_effector_reward(self, end_effector_vec: jp.ndarray) -> float:
-
         # Square Euclidean distance and sum across all end effectors (only 1 in this case)
         exponent = jp.square(jp.norm(end_effector_vec))
 
         # Scale exponent according to DeepMimic paper
         effector_reward = jp.exp(-40 * exponent)
         return effector_reward
-
-    def _get_obs(self, qp: brax.QP, info: brax.Info) -> jp.ndarray:
-        """Two joints, shoulder (3 DOF) and elbow (1 DOF). Note that joints are sorted by DOF in ascending
-        order, so elbow comes first, then shoulder."""
-
-        (el_angle_x,), (el_vel_x,) = self.sys.joints[0].angle_vel(
-            qp)  # For elbow
-        (sh_angle_x, sh_angle_y, sh_angle_z), (sh_vel_x, sh_vel_y, sh_vel_z) = \
-            self.sys.joints[1].angle_vel(qp)  # For shoulder
-
-        # Pull local joint angles for the pose reward
-        el_angle = to_3d(el_angle_x)
-        sh_angle = to_3d(jp.concatenate((sh_angle_x, sh_angle_y, sh_angle_z)))
-
-        # Pull local joint velocities for the velocity reward
-        el_vel = to_3d(jp.array(el_vel_x))
-        sh_vel = jp.concatenate((sh_vel_x, sh_vel_y, sh_vel_z))
-
-        # Pull distance from end-effector to target end-effector for end-effector reward
-        arm_qps = jp.take(qp, jp.array(self.arm_idx))
-        tip_pos, _ = arm_qps.to_world(jp.array([0.11, 0., 0.]))
-        end_effector_vec = jp.array(tip_pos - qp.pos[self.target_idx])
-
-        return jp.concatenate([el_angle, sh_angle, el_vel, sh_vel, end_effector_vec])
-
-    def _random_target(self, rng: jp.ndarray) -> Tuple[jp.ndarray, jp.ndarray]:
-        """Returns a target location in a random circle slightly above xy plane."""
-        rng, rng1, rng2 = jp.random_split(rng, 3)
-        dist = .2 * jp.random_uniform(rng1)
-        ang = jp.pi * 2. * jp.random_uniform(rng2)
-        target_x = dist * jp.cos(ang)
-        target_y = dist * jp.sin(ang)
-        target_z = .01
-        target = jp.array([target_x, target_y, target_z]).transpose()
-        return rng, target
 
 
 _SYSTEM_CONFIG = """
@@ -259,23 +269,6 @@ bodies {
     z: 1.0
   }
   mass: 0.035604715
-}
-bodies {
-  name: "target"
-  colliders {
-    position {
-    }
-    sphere {
-      radius: 0.009
-    }
-  }
-  inertia {
-    x: 1.0
-    y: 1.0
-    z: 1.0
-  }
-  mass: 1.0
-  frozen { all: true }
 }
 joints {
   name: "joint0"
