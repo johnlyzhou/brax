@@ -96,6 +96,7 @@ class ReacherMimic(env.Env):
         return env.State(qp, obs, reward, done, metrics)
 
     def step(self, state: env.State, action: jp.ndarray) -> env.State:
+        action = action/10
         qp, info = self.sys.step(state.qp, action)
         obs = self._get_obs(qp, info)
 
