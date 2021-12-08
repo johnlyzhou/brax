@@ -35,7 +35,7 @@ END_EFFECTOR_WEIGHT = 0.15
 REF_MOTION_LENGTH = 100
 DISCOUNT_FACTOR = 0.95
 
-REF_FRAME_PATH = "/Users/johnzhou/research/brax/reference_motion.npy"
+REF_FRAME_PATH = "/content/reference_motion.npy"
 
 record_ref = False
 
