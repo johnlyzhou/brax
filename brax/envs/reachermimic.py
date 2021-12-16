@@ -35,7 +35,7 @@ END_EFFECTOR_WEIGHT = 0.15
 REF_MOTION_LENGTH = 100
 DISCOUNT_FACTOR = 0.95
 
-REF_FRAME_PATH = "/content/reference_motion.npy"
+REF_FRAME_PATH = "/Users/johnzhou/research/brax/reference_motion.npy"
 
 record_ref = False
 
@@ -96,7 +96,15 @@ class ReacherMimic(env.Env):
         return env.State(qp, obs, reward, done, metrics)
 
     def step(self, state: env.State, action: jp.ndarray) -> env.State:
-        action = action/3
+        # wave sinusoidally
+        switch = True
+        mult = jp.sin(self.sys.time * jp.pi / 15) * 2
+        if mult < 0:
+            switch = False
+        if switch:
+            mult /= 2
+        action = jp.ones((2,)) * mult + np.random.uniform() - 0.5
+
         qp, info = self.sys.step(state.qp, action)
         obs = self._get_obs(qp, info)
 
